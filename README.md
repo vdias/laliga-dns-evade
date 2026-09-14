@@ -19,10 +19,7 @@ Nginx / DoH / DoT / DoQ
     v
 AdGuard Home
     |
-    | cache hit
-    +--------------------> response
-    |
-    | cache miss
+    | DNS cache disabled
     v
 127.0.0.1:5335
 laliga-dns-evade
@@ -30,6 +27,8 @@ laliga-dns-evade
     v
 127.0.0.1:5336
 AdGuard dnsproxy
+    |
+    | 64 MiB cache + optimistic caching
     |
     v
 DNS-over-HTTP/3 upstreams
@@ -59,16 +58,13 @@ Compare hashes
     +--> no changes -> exit
     |
     v
-Atomic data replacement
+Validated data replacement
     |
     v
 Restart laliga-dns-evade
     |
     v
 Verify DNS
-    |
-    v
-Flush AdGuard Home cache
 ```
 
 ## Current capabilities
@@ -90,7 +86,7 @@ Implemented:
 - DNSSEC AD flag clearing when a signed DNS response is modified.
 - Dynamic block list updates.
 - Dynamic Cloudflare prefix updates.
-- AdGuard Home cache invalidation after list changes.
+- dnsproxy DNS cache with 64 MiB capacity and optimistic caching.
 - systemd services and timer.
 - Rollback of data files if the evade service fails after an update.
 
@@ -156,7 +152,6 @@ laliga-dns-evade/
 ├── .gitignore
 │
 ├── config/
-│   └── adguard.env.example
 │
 ├── scripts/
 │   └── update-laliga-dns-evade.sh
@@ -414,7 +409,19 @@ Expected:
 dnsproxy version v0.84.1
 ```
 
-The project intentionally disables the dnsproxy cache because AdGuard Home is the caching layer.
+The project intentionally enables DNS caching in `dnsproxy`.
+
+Production cache settings:
+
+```text
+cache enabled
+cache size: 64 MiB
+optimistic caching enabled
+```
+
+AdGuard Home DNS caching is disabled. This keeps the cache behind
+`laliga-dns-evade`, so every DNS response returned to AdGuard Home passes
+through the rewrite layer, including responses served from the dnsproxy cache.
 
 ---
 
@@ -542,81 +549,64 @@ The block list is dynamic and its count changes frequently.
 
 ---
 
-# 9. Configure AdGuard Home API credentials
+# 9. Configure AdGuard Home caching
 
-The updater clears the AdGuard Home DNS cache whenever the block list or Cloudflare networks change.
+AdGuard Home must not cache DNS responses in this architecture.
 
-Copy the example:
+Caching is provided by `dnsproxy`, downstream of `laliga-dns-evade`. This
+ensures that every response returned to AdGuard Home has already passed
+through the rewrite layer.
 
-```bash
-sudo install \
-  -o root \
-  -g root \
-  -m 0600 \
-  config/adguard.env.example \
-  /etc/laliga-dns-evade/adguard.env
-```
-
-Edit:
+Stop AdGuard Home before editing its configuration:
 
 ```bash
-sudo nano /etc/laliga-dns-evade/adguard.env
+sudo systemctl stop AdGuardHome.service
 ```
 
-Example:
-
-```text
-AGH_USER=vdias
-AGH_PASS=replace-with-the-real-password
-```
-
-Permissions must remain:
+Create a backup:
 
 ```bash
-sudo chmod 0600 /etc/laliga-dns-evade/adguard.env
-sudo chown root:root /etc/laliga-dns-evade/adguard.env
+sudo cp -a \
+  /opt/AdGuardHome/AdGuardHome.yaml \
+  /opt/AdGuardHome/AdGuardHome.yaml.pre-dnsproxy-cache
+```
+
+Set:
+
+```yaml
+cache_enabled: false
+```
+
+The existing cache size and optimistic-cache parameters may remain configured.
+They are inactive while `cache_enabled` is `false`.
+
+Start AdGuard Home again:
+
+```bash
+sudo systemctl start AdGuardHome.service
 ```
 
 Verify:
 
 ```bash
-sudo stat -c '%U %G %a %n' \
-  /etc/laliga-dns-evade/adguard.env
+sudo grep -n -E \
+  'cache_enabled|cache_size|cache_ttl_min|cache_ttl_max|cache_optimistic' \
+  /opt/AdGuardHome/AdGuardHome.yaml
+
+sudo systemctl status \
+  AdGuardHome.service \
+  --no-pager \
+  -l
 ```
 
-Expected:
+Expected DNS cache state:
 
 ```text
-root root 600 /etc/laliga-dns-evade/adguard.env
+cache_enabled: false
 ```
 
-Never commit this file to Git.
-
-Test the AdGuard Home cache API:
-
-```bash
-sudo bash -c '
-set -a
-source /etc/laliga-dns-evade/adguard.env
-set +a
-
-curl \
-  --fail \
-  --silent \
-  --show-error \
-  --user "${AGH_USER}:${AGH_PASS}" \
-  --request POST \
-  http://127.0.0.1:3001/control/cache_clear
-
-echo "AdGuard cache flush: OK"
-'
-```
-
-Expected:
-
-```text
-AdGuard cache flush: OK
-```
+No AdGuard Home API credentials are required by `laliga-dns-evade` or its
+update process.
 
 ---
 
@@ -917,7 +907,6 @@ Validated 7 Cloudflare IPv6 prefixes
 blocked-any.txt changed
 Installing updated data
 Restarting laliga-dns-evade.service
-Flushing AdGuard Home DNS cache
 Update completed successfully
 ```
 
@@ -927,7 +916,7 @@ If no data changed:
 No changes detected
 ```
 
-In that case the script does not restart the daemon and does not clear the AdGuard cache.
+In that case the script does not restart the daemon.
 
 Enable the timer:
 
@@ -959,33 +948,41 @@ The current production cadence is approximately every five minutes with a small 
 
 # 17. Cache design
 
-Only AdGuard Home should provide DNS caching.
+Only `dnsproxy` provides DNS response caching.
 
-Current design:
+Current production design:
 
 ```text
 AdGuard Home:
-  cache enabled
-  cache size: 64 MiB
-  optimistic caching enabled
+  cache disabled
 
 laliga-dns-evade:
   no cache
 
 dnsproxy:
-  cache disabled
+  cache enabled
+  cache size: 64 MiB
+  optimistic caching enabled
 ```
 
-The ordering matters:
+The ordering is intentional:
 
 ```text
-AdGuard cache HIT
-    -> response directly
-
-AdGuard cache MISS
+Client
+    -> AdGuard Home
     -> laliga-dns-evade
     -> dnsproxy
+         |
+         +--> cache HIT
+         |
+         +--> cache MISS -> encrypted H3 upstreams
 ```
+
+A response served from the dnsproxy cache still returns through
+`laliga-dns-evade` before reaching AdGuard Home and the client.
+
+This matters because the rewrite decision is based on the current local block
+list.
 
 When any of these files change:
 
@@ -997,14 +994,21 @@ cloudflare-v6.txt
 
 the updater:
 
-1. Installs the new validated files.
-2. Restarts `laliga-dns-evade`.
-3. Verifies DNS resolution through port 5335.
-4. Clears the AdGuard Home DNS cache.
+1. Downloads and validates the new data.
+2. Compares it with the current production data.
+3. Installs the changed validated files.
+4. Restarts `laliga-dns-evade`.
+5. Verifies DNS resolution through port 5335.
 
-The cache is cleared after the evade daemon has successfully loaded the new data.
+The dnsproxy cache is deliberately preserved during list updates.
 
-This prevents AdGuard Home from continuing to serve an address that has just entered the block list.
+If dnsproxy already has an original DNS answer cached and one of its addresses
+has just entered `blocked-any.txt`, that cached response still passes through
+the restarted `laliga-dns-evade` instance and is evaluated against the new
+block list before being returned to the client.
+
+Therefore list changes do not require a global DNS cache flush and do not
+require AdGuard Home API credentials.
 
 ---
 
@@ -1198,23 +1202,6 @@ sudo systemctl restart \
   laliga-dns-evade.service
 ```
 
-Clear AdGuard Home cache using the configured API credentials:
-
-```bash
-sudo bash -c '
-set -a
-source /etc/laliga-dns-evade/adguard.env
-set +a
-
-curl \
-  --fail \
-  --silent \
-  --show-error \
-  --user "${AGH_USER}:${AGH_PASS}" \
-  --request POST \
-  http://127.0.0.1:3001/control/cache_clear
-'
-```
 
 Query through the normal DNS path.
 
@@ -1240,7 +1227,6 @@ sudo systemctl restart \
   laliga-dns-evade.service
 ```
 
-Clear the AdGuard cache again after restoring the production list.
 
 ---
 
@@ -1315,20 +1301,7 @@ LockPersonality
 MemoryDenyWriteExecute
 ```
 
-The AdGuard API password is stored in:
-
-```text
-/etc/laliga-dns-evade/adguard.env
-```
-
-Required permissions:
-
-```text
-root:root
-0600
-```
-
-It must never be stored in Git.
+No AdGuard Home API credentials are required by this project.
 
 ---
 
@@ -1564,11 +1537,17 @@ dig @127.0.0.1 \
   +short
 ```
 
-## AdGuard resolves but rewrites are not visible
+## DNS resolves but rewrites are not visible
 
-Check whether AdGuard answered from cache.
+AdGuard Home DNS caching should be disabled. First verify the response directly
+through the evade service:
 
-Clear the client DNS cache first.
+```bash
+dig @127.0.0.1 -p 5335 example.com A +short
+```
+
+If the direct query is correct but a client still receives an older address,
+clear the client-side DNS cache.
 
 For Windows:
 
@@ -1576,7 +1555,8 @@ For Windows:
 Clear-DnsClientCache
 ```
 
-Then clear the AdGuard cache using its API.
+Also consider any DNS cache present on an intermediate client router or
+resolver.
 
 Check the evade journal:
 
@@ -1642,7 +1622,6 @@ git push
 Never commit:
 
 ```text
-/etc/laliga-dns-evade/adguard.env
 private SSH keys
 runtime block lists
 temporary test files
@@ -1670,7 +1649,6 @@ Runtime paths:
 /usr/local/bin/laliga-dns-evade
 /usr/local/sbin/update-laliga-dns-evade.sh
 
-/etc/laliga-dns-evade/adguard.env
 
 /var/lib/laliga-dns-evade/blocked-any.txt
 /var/lib/laliga-dns-evade/cloudflare-v4.txt

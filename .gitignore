@@ -11,7 +11,6 @@
 # Secrets
 *.env
 !*.env.example
-adguard.env
 
 # Runtime/generated data
 blocked-any.txt

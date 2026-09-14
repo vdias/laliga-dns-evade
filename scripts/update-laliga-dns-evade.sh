@@ -13,7 +13,7 @@
 #   VDIAS
 #
 # Version:
-#   1.0.0
+#   1.1.0
 #
 # Date:
 #   2026-09-14
@@ -26,17 +26,16 @@
 #   - systemctl
 #   - dig
 #   - flock
-#   - /etc/laliga-dns-evade/adguard.env
 #   - laliga-dns-evade.service
 #
 # Changelog:
+#   1.1.0 - Remove AdGuard Home cache flush; cache is now provided by dnsproxy.
 #   1.0.0 - Initial production updater.
 #
 
 set -Eeuo pipefail
 
 readonly DATA_DIR="/var/lib/laliga-dns-evade"
-readonly ENV_FILE="/etc/laliga-dns-evade/adguard.env"
 readonly LOCK_FILE="/run/lock/laliga-dns-evade-update.lock"
 
 readonly BLOCKLIST_FILE="${DATA_DIR}/blocked-any.txt"
@@ -200,26 +199,6 @@ restore_backup() {
     systemctl restart "${SERVICE_NAME}" || true
 }
 
-flush_adguard_cache() {
-    # shellcheck disable=SC1090
-    source "${ENV_FILE}"
-
-    [[ -n "${AGH_USER:-}" ]] ||
-        fail "AGH_USER is not defined in ${ENV_FILE}"
-
-    [[ -n "${AGH_PASS:-}" ]] ||
-        fail "AGH_PASS is not defined in ${ENV_FILE}"
-
-    curl \
-        --fail \
-        --silent \
-        --show-error \
-        --user "${AGH_USER}:${AGH_PASS}" \
-        --request POST \
-        http://127.0.0.1:3001/control/cache_clear \
-        >/dev/null
-}
-
 verify_dns() {
     local result
 
@@ -250,9 +229,6 @@ main() {
 
     [[ -d "${DATA_DIR}" ]] ||
         fail "Data directory not found: ${DATA_DIR}"
-
-    [[ -r "${ENV_FILE}" ]] ||
-        fail "AdGuard credentials file not readable: ${ENV_FILE}"
 
     systemctl is-active --quiet dnsproxy.service ||
         fail "dnsproxy.service is not active"
@@ -367,12 +343,6 @@ main() {
     if ! verify_dns; then
         restore_backup
         fail "DNS verification through port ${DNS_TEST_PORT} failed; previous data restored"
-    fi
-
-    log "Flushing AdGuard Home DNS cache"
-
-    if ! flush_adguard_cache; then
-        fail "Data updated successfully, but AdGuard cache flush failed"
     fi
 
     log "Update completed successfully"

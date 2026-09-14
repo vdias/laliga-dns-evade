@@ -11,6 +11,9 @@ ExecStart=/usr/local/bin/dnsproxy \
     --listen=127.0.0.1 \
     --port=5336 \
     --http3 \
+    --cache \
+    --cache-size=67108864 \
+    --cache-optimistic \
     --upstream-mode=parallel \
     --upstream=h3://1.1.1.1/dns-query \
     --upstream=h3://1.0.0.1/dns-query \
