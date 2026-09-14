@@ -1,0 +1,31 @@
+[Unit]
+Description=LaLiga DNS Evade Proxy
+After=network-online.target dnsproxy.service
+Wants=network-online.target
+Requires=dnsproxy.service
+
+[Service]
+Type=simple
+User=laliga-dns-evade
+Group=laliga-dns-evade
+ExecStart=/usr/local/bin/laliga-dns-evade
+Restart=on-failure
+RestartSec=2s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadOnlyPaths=/var/lib/laliga-dns-evade
+
+[Install]
+WantedBy=multi-user.target

@@ -1,1 +1,23 @@
-/target
+# Rust build artifacts
+/target/
+
+# Local/editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Secrets
+*.env
+!*.env.example
+adguard.env
+
+# Runtime/generated data
+blocked-any.txt
+cloudflare-v4.txt
+cloudflare-v6.txt
+
+# Temporary/backup files
+*.bak
+*.tmp

@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically update LaLiga DNS Evade data
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=20s
+AccuracySec=30s
+Unit=laliga-dns-evade-update.service
+
+[Install]
+WantedBy=timers.target

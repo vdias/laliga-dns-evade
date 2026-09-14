@@ -1,0 +1,37 @@
+[Unit]
+Description=AdGuard DNSProxy upstream resolver
+Documentation=https://github.com/AdguardTeam/dnsproxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/usr/local/bin/dnsproxy \
+    --listen=127.0.0.1 \
+    --port=5336 \
+    --http3 \
+    --upstream-mode=parallel \
+    --upstream=h3://1.1.1.1/dns-query \
+    --upstream=h3://1.0.0.1/dns-query \
+    --upstream=h3://9.9.9.10/dns-query \
+    --upstream=h3://149.112.112.10/dns-query
+Restart=on-failure
+RestartSec=2s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

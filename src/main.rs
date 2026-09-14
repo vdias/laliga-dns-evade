@@ -11,9 +11,9 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
-const BLOCKLIST_PATH: &str = "/tmp/blocked-any.txt";
-const CLOUDFLARE_V4_PATH: &str = "/tmp/cloudflare-v4.txt";
-const CLOUDFLARE_V6_PATH: &str = "/tmp/cloudflare-v6.txt";
+const BLOCKLIST_PATH: &str = "/var/lib/laliga-dns-evade/blocked-any.txt";
+const CLOUDFLARE_V4_PATH: &str = "/var/lib/laliga-dns-evade/cloudflare-v4.txt";
+const CLOUDFLARE_V6_PATH: &str = "/var/lib/laliga-dns-evade/cloudflare-v6.txt";
 const LISTEN_ADDR: &str = "127.0.0.1:5335";
 const UPSTREAM_ADDR: &str = "127.0.0.1:5336";
 const MAX_UDP_PACKET_SIZE: usize = 65_535;
