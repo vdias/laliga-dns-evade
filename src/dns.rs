@@ -144,6 +144,41 @@ fn ensure_available(packet: &[u8], offset: usize, length: usize) -> Result<(), S
     Ok(())
 }
 
+
+pub fn rewrite_address_record(
+    packet: &mut [u8],
+    record: &AddressRecord,
+    replacement: std::net::IpAddr,
+) -> Result<(), String> {
+    match (record, replacement) {
+        (
+            AddressRecord::A { offset, .. },
+            std::net::IpAddr::V4(address),
+        ) => {
+            ensure_available(packet, *offset, 4)?;
+            packet[*offset..*offset + 4].copy_from_slice(&address.octets());
+            Ok(())
+        }
+
+        (
+            AddressRecord::Aaaa { offset, .. },
+            std::net::IpAddr::V6(address),
+        ) => {
+            ensure_available(packet, *offset, 16)?;
+            packet[*offset..*offset + 16].copy_from_slice(&address.octets());
+            Ok(())
+        }
+
+        (AddressRecord::A { .. }, std::net::IpAddr::V6(_)) => {
+            Err("cannot replace an A record with an IPv6 address".to_string())
+        }
+
+        (AddressRecord::Aaaa { .. }, std::net::IpAddr::V4(_)) => {
+            Err("cannot replace an AAAA record with an IPv4 address".to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +262,70 @@ mod ipv6_tests {
                 ),
             }]
         );
+    }
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn rewrites_ipv4_rdata_in_place() {
+        let mut packet = [
+            0x12, 0x34, 0x81, 0x80,
+            0x00, 0x01,
+            0x00, 0x01,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+            0x03, b'c', b'o', b'm',
+            0x00,
+            0x00, 0x01,
+            0x00, 0x01,
+            0xc0, 0x0c,
+            0x00, 0x01,
+            0x00, 0x01,
+            0x00, 0x00, 0x00, 0x3c,
+            0x00, 0x04,
+            104, 21, 1, 21,
+        ];
+
+        let records = extract_address_records(&packet).expect("valid DNS packet");
+
+        rewrite_address_record(
+            &mut packet,
+            &records[0],
+            IpAddr::V4(Ipv4Addr::new(104, 21, 1, 20)),
+        )
+        .expect("rewrite should succeed");
+
+        let records = extract_address_records(&packet).expect("rewritten packet should parse");
+
+        assert_eq!(
+            records,
+            vec![AddressRecord::A {
+                offset: packet.len() - 4,
+                address: Ipv4Addr::new(104, 21, 1, 20),
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_address_family_mismatch() {
+        let mut packet = vec![0_u8; 32];
+
+        let record = AddressRecord::A {
+            offset: 28,
+            address: Ipv4Addr::new(104, 21, 1, 21),
+        };
+
+        let result = rewrite_address_record(
+            &mut packet,
+            &record,
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        );
+
+        assert!(result.is_err());
     }
 }

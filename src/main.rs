@@ -1,9 +1,9 @@
 mod networks;
 mod blocklist;
 mod dns;
-use dns::{extract_address_records, AddressRecord};
+use dns::{extract_address_records, rewrite_address_record, AddressRecord};
 use blocklist::Blocklist;
-use networks::NetworkList;
+use networks::{find_evasive_address, NetworkList};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -125,20 +125,42 @@ async fn forward_udp(
     match extract_address_records(&response[..length]) {
         Ok(records) => {
             for record in records {
-                let address = match record {
-                    AddressRecord::A { address, .. } => IpAddr::V4(address),
-                    AddressRecord::Aaaa { address, .. } => IpAddr::V6(address),
+                let address = match &record {
+                    AddressRecord::A { address, .. } => IpAddr::V4(*address),
+                    AddressRecord::Aaaa { address, .. } => IpAddr::V6(*address),
                 };
 
-                if blocklist.contains(&address) {
-                    let is_cloudflare =
-                        cloudflare_v4.contains(&address)
-                            || cloudflare_v6.contains(&address);
+                if !blocklist.contains(&address) {
+                    continue;
+                }
 
-                    if is_cloudflare {
-                        println!("BLOCKED CLOUDFLARE address detected: {address}");
-                    } else {
-                        println!("BLOCKED NON-CLOUDFLARE address detected: {address}");
+                let networks = match address {
+                    IpAddr::V4(_) => cloudflare_v4.as_ref(),
+                    IpAddr::V6(_) => cloudflare_v6.as_ref(),
+                };
+
+                if !networks.contains(&address) {
+                    println!("BLOCKED NON-CLOUDFLARE address detected: {address}");
+                    continue;
+                }
+
+                match find_evasive_address(&address, networks, blocklist.as_ref()) {
+                    Some(replacement) => {
+                        rewrite_address_record(
+                            &mut response[..length],
+                            &record,
+                            replacement,
+                        )
+                        .map_err(io::Error::other)?;
+
+                        println!(
+                            "Rewritten blocked Cloudflare address: {address} -> {replacement}"
+                        );
+                    }
+                    None => {
+                        println!(
+                            "Blocked Cloudflare address detected but no safe replacement found: {address}"
+                        );
                     }
                 }
             }

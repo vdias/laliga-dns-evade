@@ -281,11 +281,37 @@ pub fn find_evasive_address(
     networks: &NetworkList,
     blocked: &crate::blocklist::Blocklist,
 ) -> Option<IpAddr> {
+    let containing_network = networks
+        .networks
+        .iter()
+        .find(|network| network.contains(address))?;
+
     match address {
         IpAddr::V4(address) => {
             let original = u32::from(*address);
+            let base = original & 0xffff_ff00;
+            let last = (original & 0xff) as i32;
 
-            for offset in 1..255_u32 {
+            // Prefer a nearby address inside the same /24.
+            for offset in 1..255_i32 {
+                for candidate_last in [last + offset, last - offset] {
+                    if !(1..=254).contains(&candidate_last) {
+                        continue;
+                    }
+
+                    let candidate = base | candidate_last as u32;
+                    let candidate_ip = IpAddr::V4(Ipv4Addr::from(candidate));
+
+                    if containing_network.contains(&candidate_ip)
+                        && !blocked.contains(&candidate_ip)
+                    {
+                        return Some(candidate_ip);
+                    }
+                }
+            }
+
+            // Fallback: search nearby addresses inside the same Cloudflare prefix.
+            for offset in 1..65_536_u32 {
                 for candidate in [
                     original.checked_add(offset),
                     original.checked_sub(offset),
@@ -301,7 +327,7 @@ pub fn find_evasive_address(
 
                     let candidate_ip = IpAddr::V4(Ipv4Addr::from(candidate));
 
-                    if networks.contains(&candidate_ip)
+                    if containing_network.contains(&candidate_ip)
                         && !blocked.contains(&candidate_ip)
                     {
                         return Some(candidate_ip);
@@ -325,7 +351,7 @@ pub fn find_evasive_address(
                 {
                     let candidate_ip = IpAddr::V6(Ipv6Addr::from(candidate));
 
-                    if networks.contains(&candidate_ip)
+                    if containing_network.contains(&candidate_ip)
                         && !blocked.contains(&candidate_ip)
                     {
                         return Some(candidate_ip);
