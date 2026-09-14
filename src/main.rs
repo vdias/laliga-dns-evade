@@ -1,7 +1,7 @@
 mod networks;
 mod blocklist;
 mod dns;
-use dns::{extract_address_records, rewrite_address_record, AddressRecord};
+use dns::{clear_authenticated_data, extract_address_records, rewrite_address_record, AddressRecord};
 use blocklist::Blocklist;
 use networks::{find_evasive_address, NetworkList};
 use std::io;
@@ -157,6 +157,9 @@ async fn forward_udp(
                         )
                         .map_err(io::Error::other)?;
 
+                        clear_authenticated_data(&mut response[..length])
+                            .map_err(io::Error::other)?;
+
                         println!(
                             "Rewritten blocked Cloudflare address: {address} -> {replacement}"
                         );
@@ -285,6 +288,9 @@ async fn forward_tcp(
                                 replacement,
                             )
                             .map_err(io::Error::other)?;
+
+                            clear_authenticated_data(&mut response)
+                                .map_err(io::Error::other)?;
 
                             println!(
                                 "Rewritten blocked Cloudflare address over TCP:                                  {address} -> {replacement}"

@@ -179,6 +179,20 @@ pub fn rewrite_address_record(
     }
 }
 
+
+pub fn clear_authenticated_data(packet: &mut [u8]) -> Result<(), String> {
+    if packet.len() < 4 {
+        return Err("DNS packet too short to contain flags".to_string());
+    }
+
+    // DNS header flags occupy bytes 2-3.
+    // AD (Authenticated Data) is bit 5 of the low-order flags byte.
+    packet[3] &= !0x20;
+
+    Ok(())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +341,36 @@ mod rewrite_tests {
         );
 
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod dnssec_flag_tests {
+    use super::*;
+
+    #[test]
+    fn clears_authenticated_data_flag() {
+        let mut packet = [
+            0x12, 0x34,
+            0x81, 0xa0, // QR, RD, RA, AD
+            0x00, 0x00,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x00, 0x00,
+        ];
+
+        clear_authenticated_data(&mut packet)
+            .expect("AD flag should be cleared");
+
+        assert_eq!(packet[3] & 0x20, 0);
+        assert_eq!(packet[2], 0x81);
+        assert_eq!(packet[3] & 0x80, 0x80); // RA preserved
+    }
+
+    #[test]
+    fn rejects_short_packet_when_clearing_ad() {
+        let mut packet = [0_u8; 3];
+
+        assert!(clear_authenticated_data(&mut packet).is_err());
     }
 }
