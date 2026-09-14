@@ -1,7 +1,7 @@
 mod networks;
 mod blocklist;
 mod dns;
-use dns::{clear_authenticated_data, extract_address_records, rewrite_address_record, AddressRecord};
+use dns::{clear_authenticated_data, extract_address_records, rewrite_address_record};
 use blocklist::Blocklist;
 use networks::{find_evasive_address, NetworkList};
 use std::io;
@@ -129,10 +129,7 @@ async fn forward_udp(
     match extract_address_records(&response[..length]) {
         Ok(records) => {
             for record in records {
-                let address = match &record {
-                    AddressRecord::A { address, .. } => IpAddr::V4(*address),
-                    AddressRecord::Aaaa { address, .. } => IpAddr::V6(*address),
-                };
+                let address = record.address();
 
                 if !blocklist.contains(&address) {
                     continue;
@@ -251,14 +248,7 @@ async fn forward_tcp(
         match extract_address_records(&response) {
             Ok(records) => {
                 for record in records {
-                    let address = match &record {
-                        AddressRecord::A { address, .. } => {
-                            IpAddr::V4(*address)
-                        }
-                        AddressRecord::Aaaa { address, .. } => {
-                            IpAddr::V6(*address)
-                        }
-                    };
+                    let address = record.address();
 
                     if !blocklist.contains(&address) {
                         continue;

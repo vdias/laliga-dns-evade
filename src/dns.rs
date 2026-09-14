@@ -1,8 +1,13 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const DNS_HEADER_LEN: usize = 12;
 const TYPE_A: u16 = 1;
 const TYPE_AAAA: u16 = 28;
+const TYPE_SVCB: u16 = 64;
+const TYPE_HTTPS: u16 = 65;
+
+const SVC_PARAM_IPV4HINT: u16 = 4;
+const SVC_PARAM_IPV6HINT: u16 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressRecord {
@@ -14,6 +19,23 @@ pub enum AddressRecord {
         offset: usize,
         address: Ipv6Addr,
     },
+    Ipv4Hint {
+        offset: usize,
+        address: Ipv4Addr,
+    },
+    Ipv6Hint {
+        offset: usize,
+        address: Ipv6Addr,
+    },
+}
+
+impl AddressRecord {
+    pub fn address(&self) -> IpAddr {
+        match self {
+            Self::A { address, .. } | Self::Ipv4Hint { address, .. } => IpAddr::V4(*address),
+            Self::Aaaa { address, .. } | Self::Ipv6Hint { address, .. } => IpAddr::V6(*address),
+        }
+    }
 }
 
 pub fn extract_address_records(packet: &[u8]) -> Result<Vec<AddressRecord>, String> {
@@ -74,6 +96,9 @@ pub fn extract_address_records(packet: &[u8]) -> Result<Vec<AddressRecord>, Stri
                     address: Ipv6Addr::from(octets),
                 });
             }
+            (TYPE_SVCB, _) | (TYPE_HTTPS, _) => {
+                extract_svcb_address_hints(packet, offset, rdlength, &mut records)?;
+            }
             _ => {}
         }
 
@@ -81,6 +106,95 @@ pub fn extract_address_records(packet: &[u8]) -> Result<Vec<AddressRecord>, Stri
     }
 
     Ok(records)
+}
+
+fn extract_svcb_address_hints(
+    packet: &[u8],
+    rdata_offset: usize,
+    rdlength: usize,
+    records: &mut Vec<AddressRecord>,
+) -> Result<(), String> {
+    let rdata_end = rdata_offset
+        .checked_add(rdlength)
+        .ok_or_else(|| "SVCB/HTTPS RDATA offset overflow".to_string())?;
+
+    ensure_available(packet, rdata_offset, rdlength)?;
+
+    // SVCB/HTTPS RDATA begins with:
+    //   SvcPriority: 2 bytes
+    //   TargetName: DNS name
+    //   SvcParams: repeated key/length/value tuples
+    if rdlength < 3 {
+        return Err("SVCB/HTTPS RDATA is too short".to_string());
+    }
+
+    let target_offset = rdata_offset + 2;
+    let mut param_offset = skip_name(packet, target_offset)?;
+
+    if param_offset > rdata_end {
+        return Err("SVCB/HTTPS TargetName exceeds RDATA boundary".to_string());
+    }
+
+    while param_offset < rdata_end {
+        if rdata_end - param_offset < 4 {
+            return Err("truncated SVCB/HTTPS SvcParam header".to_string());
+        }
+
+        let key = read_u16(packet, param_offset)?;
+        let value_len = read_u16(packet, param_offset + 2)? as usize;
+        let value_offset = param_offset + 4;
+        let value_end = value_offset
+            .checked_add(value_len)
+            .ok_or_else(|| "SVCB/HTTPS SvcParam length overflow".to_string())?;
+
+        if value_end > rdata_end {
+            return Err("SVCB/HTTPS SvcParam exceeds RDATA boundary".to_string());
+        }
+
+        match key {
+            SVC_PARAM_IPV4HINT => {
+                if value_len == 0 || value_len % 4 != 0 {
+                    return Err(format!(
+                        "invalid ipv4hint length {value_len}; expected a non-zero multiple of 4"
+                    ));
+                }
+
+                for address_offset in (value_offset..value_end).step_by(4) {
+                    records.push(AddressRecord::Ipv4Hint {
+                        offset: address_offset,
+                        address: Ipv4Addr::new(
+                            packet[address_offset],
+                            packet[address_offset + 1],
+                            packet[address_offset + 2],
+                            packet[address_offset + 3],
+                        ),
+                    });
+                }
+            }
+            SVC_PARAM_IPV6HINT => {
+                if value_len == 0 || value_len % 16 != 0 {
+                    return Err(format!(
+                        "invalid ipv6hint length {value_len}; expected a non-zero multiple of 16"
+                    ));
+                }
+
+                for address_offset in (value_offset..value_end).step_by(16) {
+                    let mut octets = [0_u8; 16];
+                    octets.copy_from_slice(&packet[address_offset..address_offset + 16]);
+
+                    records.push(AddressRecord::Ipv6Hint {
+                        offset: address_offset,
+                        address: Ipv6Addr::from(octets),
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        param_offset = value_end;
+    }
+
+    Ok(())
 }
 
 fn skip_name(packet: &[u8], mut offset: usize) -> Result<usize, String> {
@@ -144,41 +258,38 @@ fn ensure_available(packet: &[u8], offset: usize, length: usize) -> Result<(), S
     Ok(())
 }
 
-
 pub fn rewrite_address_record(
     packet: &mut [u8],
     record: &AddressRecord,
-    replacement: std::net::IpAddr,
+    replacement: IpAddr,
 ) -> Result<(), String> {
     match (record, replacement) {
         (
-            AddressRecord::A { offset, .. },
-            std::net::IpAddr::V4(address),
+            AddressRecord::A { offset, .. } | AddressRecord::Ipv4Hint { offset, .. },
+            IpAddr::V4(address),
         ) => {
             ensure_available(packet, *offset, 4)?;
             packet[*offset..*offset + 4].copy_from_slice(&address.octets());
             Ok(())
         }
-
         (
-            AddressRecord::Aaaa { offset, .. },
-            std::net::IpAddr::V6(address),
+            AddressRecord::Aaaa { offset, .. } | AddressRecord::Ipv6Hint { offset, .. },
+            IpAddr::V6(address),
         ) => {
             ensure_available(packet, *offset, 16)?;
             packet[*offset..*offset + 16].copy_from_slice(&address.octets());
             Ok(())
         }
-
-        (AddressRecord::A { .. }, std::net::IpAddr::V6(_)) => {
-            Err("cannot replace an A record with an IPv6 address".to_string())
-        }
-
-        (AddressRecord::Aaaa { .. }, std::net::IpAddr::V4(_)) => {
-            Err("cannot replace an AAAA record with an IPv4 address".to_string())
-        }
+        (
+            AddressRecord::A { .. } | AddressRecord::Ipv4Hint { .. },
+            IpAddr::V6(_),
+        ) => Err("cannot replace an IPv4 DNS address with an IPv6 address".to_string()),
+        (
+            AddressRecord::Aaaa { .. } | AddressRecord::Ipv6Hint { .. },
+            IpAddr::V4(_),
+        ) => Err("cannot replace an IPv6 DNS address with an IPv4 address".to_string()),
     }
 }
-
 
 pub fn clear_authenticated_data(packet: &mut [u8]) -> Result<(), String> {
     if packet.len() < 4 {
@@ -191,7 +302,6 @@ pub fn clear_authenticated_data(packet: &mut [u8]) -> Result<(), String> {
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -282,7 +392,6 @@ mod ipv6_tests {
 #[cfg(test)]
 mod rewrite_tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn rewrites_ipv4_rdata_in_place() {
@@ -341,6 +450,135 @@ mod rewrite_tests {
         );
 
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod svcb_https_tests {
+    use super::*;
+
+    fn service_binding_packet(record_type: u16) -> Vec<u8> {
+        let mut packet = vec![
+            0x12, 0x34, 0x81, 0x80,
+            0x00, 0x01,
+            0x00, 0x01,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+            0x03, b'c', b'o', b'm',
+            0x00,
+        ];
+
+        packet.extend_from_slice(&record_type.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+
+        packet.extend_from_slice(&[0xc0, 0x0c]);
+        packet.extend_from_slice(&record_type.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&60_u32.to_be_bytes());
+
+        let rdata = [
+            0x00, 0x01,
+            0x00,
+            0x00, 0x04,
+            0x00, 0x08,
+            104, 16, 132, 229,
+            104, 16, 133, 229,
+            0x00, 0x06,
+            0x00, 0x10,
+            0x26, 0x06, 0x47, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x11, 0x11,
+        ];
+
+        packet.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        packet.extend_from_slice(&rdata);
+
+        packet
+    }
+
+    #[test]
+    fn extracts_https_ipv4_and_ipv6_hints() {
+        let packet = service_binding_packet(TYPE_HTTPS);
+        let records = extract_address_records(&packet).expect("valid HTTPS DNS packet");
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records[0].address(),
+            IpAddr::V4(Ipv4Addr::new(104, 16, 132, 229))
+        );
+        assert_eq!(
+            records[1].address(),
+            IpAddr::V4(Ipv4Addr::new(104, 16, 133, 229))
+        );
+        assert_eq!(
+            records[2].address(),
+            IpAddr::V6(Ipv6Addr::new(
+                0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111
+            ))
+        );
+    }
+
+    #[test]
+    fn extracts_svcb_ipv4_and_ipv6_hints() {
+        let packet = service_binding_packet(TYPE_SVCB);
+        let records = extract_address_records(&packet).expect("valid SVCB DNS packet");
+
+        assert_eq!(records.len(), 3);
+        assert!(matches!(records[0], AddressRecord::Ipv4Hint { .. }));
+        assert!(matches!(records[2], AddressRecord::Ipv6Hint { .. }));
+    }
+
+    #[test]
+    fn rewrites_https_ipv4hint_in_place() {
+        let mut packet = service_binding_packet(TYPE_HTTPS);
+        let records = extract_address_records(&packet).expect("valid HTTPS DNS packet");
+
+        let record = records
+            .iter()
+            .find(|record| {
+                record.address() == IpAddr::V4(Ipv4Addr::new(104, 16, 132, 229))
+            })
+            .expect("ipv4hint record");
+
+        rewrite_address_record(
+            &mut packet,
+            record,
+            IpAddr::V4(Ipv4Addr::new(104, 16, 132, 230)),
+        )
+        .expect("ipv4hint rewrite should succeed");
+
+        let rewritten = extract_address_records(&packet).expect("rewritten packet should parse");
+
+        assert!(rewritten.iter().any(|record| {
+            record.address() == IpAddr::V4(Ipv4Addr::new(104, 16, 132, 230))
+        }));
+    }
+
+    #[test]
+    fn rewrites_https_ipv6hint_in_place() {
+        let mut packet = service_binding_packet(TYPE_HTTPS);
+        let records = extract_address_records(&packet).expect("valid HTTPS DNS packet");
+
+        let original = IpAddr::V6(Ipv6Addr::new(
+            0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111,
+        ));
+        let replacement = IpAddr::V6(Ipv6Addr::new(
+            0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1112,
+        ));
+
+        let record = records
+            .iter()
+            .find(|record| record.address() == original)
+            .expect("ipv6hint record");
+
+        rewrite_address_record(&mut packet, record, replacement)
+            .expect("ipv6hint rewrite should succeed");
+
+        let rewritten = extract_address_records(&packet).expect("rewritten packet should parse");
+
+        assert!(rewritten.iter().any(|record| record.address() == replacement));
     }
 }
 

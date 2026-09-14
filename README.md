@@ -89,10 +89,10 @@ Implemented:
 - dnsproxy DNS cache with 64 MiB capacity and optimistic caching.
 - systemd services and timer.
 - Rollback of data files if the evade service fails after an update.
+- HTTPS/SVCB `ipv4hint` / `ipv6hint` parsing and rewriting.
 
 Not implemented yet:
 
-- HTTPS/SVCB `ipv4hint` / `ipv6hint` rewriting.
 - Non-Cloudflare CDN rewriting.
 - Akamai/Fastly/GitHub-specific verified redirect pools.
 - Runtime list reload without restarting the daemon.
