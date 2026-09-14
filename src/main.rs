@@ -1,7 +1,9 @@
+mod networks;
 mod blocklist;
 mod dns;
 use dns::{extract_address_records, AddressRecord};
 use blocklist::Blocklist;
+use networks::NetworkList;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -10,6 +12,8 @@ use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 const BLOCKLIST_PATH: &str = "/tmp/blocked-any.txt";
+const CLOUDFLARE_V4_PATH: &str = "/tmp/cloudflare-v4.txt";
+const CLOUDFLARE_V6_PATH: &str = "/tmp/cloudflare-v6.txt";
 const LISTEN_ADDR: &str = "127.0.0.1:5335";
 const UPSTREAM_ADDR: &str = "127.0.0.1:5336";
 const MAX_UDP_PACKET_SIZE: usize = 65_535;
@@ -23,11 +27,31 @@ async fn main() -> io::Result<()> {
 
     println!("Loaded {} blocked IP addresses", blocklist.len());
 
+    let cloudflare_v4 = Arc::new(
+        NetworkList::load(CLOUDFLARE_V4_PATH)
+            .map_err(io::Error::other)?
+    );
+
+    let cloudflare_v6 = Arc::new(
+        NetworkList::load(CLOUDFLARE_V6_PATH)
+            .map_err(io::Error::other)?
+    );
+
+    println!(
+        "Loaded {} Cloudflare IPv4 prefixes and {} IPv6 prefixes",
+        cloudflare_v4.len(),
+        cloudflare_v6.len()
+    );
+
     println!("laliga-dns-evade v{}", env!("CARGO_PKG_VERSION"));
     println!("Listening on {LISTEN_ADDR} (UDP/TCP)");
     println!("Upstream: {UPSTREAM_ADDR}");
 
-    let udp_task = tokio::spawn(run_udp_proxy(Arc::clone(&blocklist)));
+    let udp_task = tokio::spawn(run_udp_proxy(
+        Arc::clone(&blocklist),
+        Arc::clone(&cloudflare_v4),
+        Arc::clone(&cloudflare_v6),
+    ));
     let tcp_task = tokio::spawn(run_tcp_proxy());
 
     tokio::select! {
@@ -50,7 +74,11 @@ async fn main() -> io::Result<()> {
     }
 }
 
-async fn run_udp_proxy(blocklist: Arc<Blocklist>) -> io::Result<()> {
+async fn run_udp_proxy(
+    blocklist: Arc<Blocklist>,
+    cloudflare_v4: Arc<NetworkList>,
+    cloudflare_v6: Arc<NetworkList>,
+) -> io::Result<()> {
     let listener = Arc::new(UdpSocket::bind(LISTEN_ADDR).await?);
     let mut buffer = vec![0_u8; MAX_UDP_PACKET_SIZE];
 
@@ -59,10 +87,19 @@ async fn run_udp_proxy(blocklist: Arc<Blocklist>) -> io::Result<()> {
         let request = buffer[..length].to_vec();
         let client_socket = Arc::clone(&listener);
         let blocklist = Arc::clone(&blocklist);
+        let cloudflare_v4 = Arc::clone(&cloudflare_v4);
+        let cloudflare_v6 = Arc::clone(&cloudflare_v6);
 
         tokio::spawn(async move {
-            if let Err(error) =
-                forward_udp(client_socket, request, client_addr, blocklist).await
+            if let Err(error) = forward_udp(
+                client_socket,
+                request,
+                client_addr,
+                blocklist,
+                cloudflare_v4,
+                cloudflare_v6,
+            )
+            .await
             {
                 eprintln!("UDP forwarding error for {client_addr}: {error}");
             }
@@ -75,6 +112,8 @@ async fn forward_udp(
     request: Vec<u8>,
     client_addr: SocketAddr,
     blocklist: Arc<Blocklist>,
+    cloudflare_v4: Arc<NetworkList>,
+    cloudflare_v6: Arc<NetworkList>,
 ) -> io::Result<()> {
     let upstream = UdpSocket::bind("127.0.0.1:0").await?;
     upstream.connect(UPSTREAM_ADDR).await?;
@@ -92,7 +131,15 @@ async fn forward_udp(
                 };
 
                 if blocklist.contains(&address) {
-                    println!("BLOCKED DNS address detected: {address}");
+                    let is_cloudflare =
+                        cloudflare_v4.contains(&address)
+                            || cloudflare_v6.contains(&address);
+
+                    if is_cloudflare {
+                        println!("BLOCKED CLOUDFLARE address detected: {address}");
+                    } else {
+                        println!("BLOCKED NON-CLOUDFLARE address detected: {address}");
+                    }
                 }
             }
         }
