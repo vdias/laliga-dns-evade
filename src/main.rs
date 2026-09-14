@@ -8,7 +8,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use tokio::io::copy_bidirectional;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 const BLOCKLIST_PATH: &str = "/tmp/blocked-any.txt";
@@ -52,7 +52,11 @@ async fn main() -> io::Result<()> {
         Arc::clone(&cloudflare_v4),
         Arc::clone(&cloudflare_v6),
     ));
-    let tcp_task = tokio::spawn(run_tcp_proxy());
+    let tcp_task = tokio::spawn(run_tcp_proxy(
+        Arc::clone(&blocklist),
+        Arc::clone(&cloudflare_v4),
+        Arc::clone(&cloudflare_v6),
+    ));
 
     tokio::select! {
         result = udp_task => {
@@ -177,24 +181,131 @@ async fn forward_udp(
     Ok(())
 }
 
-async fn run_tcp_proxy() -> io::Result<()> {
+async fn run_tcp_proxy(
+    blocklist: Arc<Blocklist>,
+    cloudflare_v4: Arc<NetworkList>,
+    cloudflare_v6: Arc<NetworkList>,
+) -> io::Result<()> {
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
 
     loop {
         let (client, client_addr) = listener.accept().await?;
+        let blocklist = Arc::clone(&blocklist);
+        let cloudflare_v4 = Arc::clone(&cloudflare_v4);
+        let cloudflare_v6 = Arc::clone(&cloudflare_v6);
 
         tokio::spawn(async move {
-            if let Err(error) = forward_tcp(client).await {
+            if let Err(error) = forward_tcp(
+                client,
+                blocklist,
+                cloudflare_v4,
+                cloudflare_v6,
+            )
+            .await
+            {
                 eprintln!("TCP forwarding error for {client_addr}: {error}");
             }
         });
     }
 }
 
-async fn forward_tcp(mut client: TcpStream) -> io::Result<()> {
+async fn forward_tcp(
+    mut client: TcpStream,
+    blocklist: Arc<Blocklist>,
+    cloudflare_v4: Arc<NetworkList>,
+    cloudflare_v6: Arc<NetworkList>,
+) -> io::Result<()> {
     let mut upstream = TcpStream::connect(UPSTREAM_ADDR).await?;
 
-    copy_bidirectional(&mut client, &mut upstream).await?;
+    loop {
+        let mut request_length_bytes = [0_u8; 2];
 
-    Ok(())
+        match client.read_exact(&mut request_length_bytes).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+
+        let request_length = u16::from_be_bytes(request_length_bytes) as usize;
+        let mut request = vec![0_u8; request_length];
+
+        client.read_exact(&mut request).await?;
+
+        upstream.write_all(&request_length_bytes).await?;
+        upstream.write_all(&request).await?;
+
+        let mut response_length_bytes = [0_u8; 2];
+        upstream.read_exact(&mut response_length_bytes).await?;
+
+        let response_length =
+            u16::from_be_bytes(response_length_bytes) as usize;
+
+        let mut response = vec![0_u8; response_length];
+        upstream.read_exact(&mut response).await?;
+
+        match extract_address_records(&response) {
+            Ok(records) => {
+                for record in records {
+                    let address = match &record {
+                        AddressRecord::A { address, .. } => {
+                            IpAddr::V4(*address)
+                        }
+                        AddressRecord::Aaaa { address, .. } => {
+                            IpAddr::V6(*address)
+                        }
+                    };
+
+                    if !blocklist.contains(&address) {
+                        continue;
+                    }
+
+                    let networks = match address {
+                        IpAddr::V4(_) => cloudflare_v4.as_ref(),
+                        IpAddr::V6(_) => cloudflare_v6.as_ref(),
+                    };
+
+                    if !networks.contains(&address) {
+                        println!(
+                            "BLOCKED NON-CLOUDFLARE address detected over TCP: {address}"
+                        );
+                        continue;
+                    }
+
+                    match find_evasive_address(
+                        &address,
+                        networks,
+                        blocklist.as_ref(),
+                    ) {
+                        Some(replacement) => {
+                            rewrite_address_record(
+                                &mut response,
+                                &record,
+                                replacement,
+                            )
+                            .map_err(io::Error::other)?;
+
+                            println!(
+                                "Rewritten blocked Cloudflare address over TCP:                                  {address} -> {replacement}"
+                            );
+                        }
+                        None => {
+                            println!(
+                                "Blocked Cloudflare address detected over TCP                                  but no safe replacement found: {address}"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "Failed to inspect TCP DNS response: {error}"
+                );
+            }
+        }
+
+        client.write_all(&response_length_bytes).await?;
+        client.write_all(&response).await?;
+    }
 }
