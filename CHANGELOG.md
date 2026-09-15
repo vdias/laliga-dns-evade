@@ -4,6 +4,21 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-15
+
+### Added
+
+- DNS proxy over UDP and TCP.
+- IPv4 `A` record inspection and rewriting.
+- IPv6 `AAAA` record inspection and rewriting.
+- Cloudflare IPv4 and IPv6 prefix validation.
+- In-place DNS address replacement.
+- DNSSEC `AD` flag clearing after response modification.
+- Blocked non-Cloudflare address detection and logging.
+- HTTPS/SVCB parsing.
+- HTTPS/SVCB `ipv4hint` and `ipv6hint` rewriting.
+- Unit tests covering IPv4, IPv6, rewriting, DNSSEC flag handling, network matching, and HTTPS/SVCB hints.
+
 ### Documentation
 
 - Redesigned README for public release.
@@ -19,21 +34,6 @@ All notable changes to this project are documented here.
 - Added automated amd64 and ARM64 GitHub Releases.
 - Added SHA-256 checksums for release archives.
 - Added GitHub artifact attestations for release build provenance.
-
-## [0.1.0] - 2026-09-14
-
-### Added
-
-- DNS proxy over UDP and TCP.
-- IPv4 `A` record inspection and rewriting.
-- IPv6 `AAAA` record inspection and rewriting.
-- Cloudflare IPv4 and IPv6 prefix validation.
-- In-place DNS address replacement.
-- DNSSEC `AD` flag clearing after response modification.
-- Blocked non-Cloudflare address detection and logging.
-- HTTPS/SVCB parsing.
-- HTTPS/SVCB `ipv4hint` and `ipv6hint` rewriting.
-- Unit tests covering IPv4, IPv6, rewriting, DNSSEC flag handling, network matching, and HTTPS/SVCB hints.
 
 ### Changed
 

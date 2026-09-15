@@ -14,17 +14,7 @@ The repository uses complementary automated controls:
 - **Dependabot** for dependency update pull requests and vulnerability alerts.
 - **GitHub Artifact Attestations** for release build provenance.
 
-These controls reduce risk but do not constitute a formal independent security audit or certification.
-
-The project should be described as:
-
-> Automated security scanning: GitHub CodeQL + RustSec
-
-and not as:
-
-> Security audited by GitHub
-
-unless an actual independent audit has been performed.
+These automated controls reduce risk but do not constitute a formal independent security audit or certification.
 
 ## DNS response modification
 

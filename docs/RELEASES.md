@@ -37,8 +37,6 @@ laliga-dns-evade-v0.1.0-linux-<arch>/
 Before creating a release tag:
 
 ```bash
-cd /opt/laliga-dns-evade
-
 cargo check --locked
 cargo test --locked
 cargo build --release --locked
