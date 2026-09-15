@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            asset_arch: amd64
+          - runner: ubuntu-24.04-arm
+            asset_arch: arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v6
+
+      - name: Validate tag matches Cargo package version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(
+            awk '
+              /^\[package\]$/ { in_package=1; next }
+              /^\[/ && in_package { exit }
+              in_package && /^version[[:space:]]*=/ {
+                gsub(/"/, "", $3)
+                print $3
+                exit
+              }
+            ' Cargo.toml
+          )"
+
+          if [[ -z "${cargo_version}" ]]; then
+            echo "Could not determine package version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          if [[ "${tag_version}" != "${cargo_version}" ]]; then
+            echo "Tag version ${tag_version} does not match Cargo.toml version ${cargo_version}" >&2
+            exit 1
+          fi
+
+      - name: Show build environment
+        run: |
+          uname -a
+          rustc --version
+          cargo --version
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          package="laliga-dns-evade-${GITHUB_REF_NAME}-linux-${{ matrix.asset_arch }}"
+
+          mkdir -p "dist/${package}"
+
+          install -m 0755 \
+            target/release/laliga-dns-evade \
+            "dist/${package}/laliga-dns-evade"
+
+          install -m 0644 LICENSE "dist/${package}/LICENSE"
+          install -m 0644 README.md "dist/${package}/README.md"
+
+          tar \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C dist \
+            -czf "dist/${package}.tar.gz" \
+            "${package}"
+
+          sha256sum "dist/${package}.tar.gz"
+
+      - name: Attest release archive
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/laliga-dns-evade-${{ github.ref_name }}-linux-${{ matrix.asset_arch }}.tar.gz
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset_arch }}
+          path: dist/laliga-dns-evade-${{ github.ref_name }}-linux-${{ matrix.asset_arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - build
+
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v6
+
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd dist
+          sha256sum laliga-dns-evade-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/laliga-dns-evade-*.tar.gz \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

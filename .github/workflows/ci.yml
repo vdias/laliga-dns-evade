@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Show Rust versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Cargo check
+        run: cargo check --locked
+
+      - name: Cargo test
+        run: cargo test --locked
+
+      - name: Release build
+        run: cargo build --release --locked
