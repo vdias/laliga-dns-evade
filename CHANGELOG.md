@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-25
+
+### Changed
+
+- Runtime data is reloaded on `SIGHUP` without restarting the process or closing the listeners.
+- A failed reload keeps the previous data in memory and logs the cause.
+- `laliga-dns-evade.service` defines `ExecReload`.
+- The updater runs `systemctl reload` instead of `systemctl restart` (updater 1.2.0).
+
 ## [0.1.0] - 2026-09-15
 
 ### Added

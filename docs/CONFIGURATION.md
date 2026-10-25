@@ -41,14 +41,16 @@ files:
 
 ## Reload behavior
 
-Runtime files are loaded at process startup.
+Runtime files are loaded at process startup and reloaded on `SIGHUP`.
 
 After replacing validated runtime data:
 
 ```bash
-sudo systemctl restart laliga-dns-evade.service
+sudo systemctl reload laliga-dns-evade.service
 sudo systemctl is-active laliga-dns-evade.service
 ```
+
+All three files are read and validated before they replace the data in memory. If any file is invalid, the service keeps the previous data and logs `Reload failed, keeping previous data`. Queries in flight finish with the data they started with. The listeners stay open, so no query is dropped.
 
 Inspect startup counts:
 

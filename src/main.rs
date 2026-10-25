@@ -6,10 +6,11 @@ use blocklist::Blocklist;
 use networks::{find_evasive_address, NetworkList};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::signal::unix::{signal, SignalKind};
 
 const BLOCKLIST_PATH: &str = "/var/lib/laliga-dns-evade/blocked-any.txt";
 const CLOUDFLARE_V4_PATH: &str = "/var/lib/laliga-dns-evade/cloudflare-v4.txt";
@@ -18,45 +19,66 @@ const LISTEN_ADDR: &str = "127.0.0.1:5335";
 const UPSTREAM_ADDR: &str = "127.0.0.1:5336";
 const MAX_UDP_PACKET_SIZE: usize = 65_535;
 
+struct Data {
+    blocklist: Arc<Blocklist>,
+    cloudflare_v4: Arc<NetworkList>,
+    cloudflare_v6: Arc<NetworkList>,
+}
+
+type SharedData = Arc<RwLock<Arc<Data>>>;
+
+impl Data {
+    fn load() -> Result<Self, String> {
+        Ok(Self {
+            blocklist: Arc::new(Blocklist::load(BLOCKLIST_PATH)?),
+            cloudflare_v4: Arc::new(NetworkList::load(CLOUDFLARE_V4_PATH)?),
+            cloudflare_v6: Arc::new(NetworkList::load(CLOUDFLARE_V6_PATH)?),
+        })
+    }
+
+    fn print_counts(&self, verb: &str) {
+        println!("{verb} {} blocked IP addresses", self.blocklist.len());
+        println!(
+            "{verb} {} Cloudflare IPv4 prefixes and {} IPv6 prefixes",
+            self.cloudflare_v4.len(),
+            self.cloudflare_v6.len()
+        );
+    }
+}
+
+fn current_data(shared: &SharedData) -> Arc<Data> {
+    Arc::clone(&shared.read().unwrap_or_else(|error| error.into_inner()))
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let blocklist = Arc::new(
-        Blocklist::load(BLOCKLIST_PATH)
-            .map_err(io::Error::other)?
-    );
+    let mut hangup = signal(SignalKind::hangup())?;
 
-    println!("Loaded {} blocked IP addresses", blocklist.len());
+    let data = Data::load().map_err(io::Error::other)?;
+    data.print_counts("Loaded");
 
-    let cloudflare_v4 = Arc::new(
-        NetworkList::load(CLOUDFLARE_V4_PATH)
-            .map_err(io::Error::other)?
-    );
-
-    let cloudflare_v6 = Arc::new(
-        NetworkList::load(CLOUDFLARE_V6_PATH)
-            .map_err(io::Error::other)?
-    );
-
-    println!(
-        "Loaded {} Cloudflare IPv4 prefixes and {} IPv6 prefixes",
-        cloudflare_v4.len(),
-        cloudflare_v6.len()
-    );
+    let shared: SharedData = Arc::new(RwLock::new(Arc::new(data)));
 
     println!("laliga-dns-evade v{}", env!("CARGO_PKG_VERSION"));
     println!("Listening on {LISTEN_ADDR} (UDP/TCP)");
     println!("Upstream: {UPSTREAM_ADDR}");
 
-    let udp_task = tokio::spawn(run_udp_proxy(
-        Arc::clone(&blocklist),
-        Arc::clone(&cloudflare_v4),
-        Arc::clone(&cloudflare_v6),
-    ));
-    let tcp_task = tokio::spawn(run_tcp_proxy(
-        Arc::clone(&blocklist),
-        Arc::clone(&cloudflare_v4),
-        Arc::clone(&cloudflare_v6),
-    ));
+    let udp_task = tokio::spawn(run_udp_proxy(Arc::clone(&shared)));
+    let tcp_task = tokio::spawn(run_tcp_proxy(Arc::clone(&shared)));
+    let reload_task = tokio::spawn(async move {
+        while hangup.recv().await.is_some() {
+            match Data::load() {
+                Ok(data) => {
+                    data.print_counts("Reloaded");
+                    *shared.write().unwrap_or_else(|error| error.into_inner()) =
+                        Arc::new(data);
+                }
+                Err(error) => {
+                    eprintln!("Reload failed, keeping previous data: {error}");
+                }
+            }
+        }
+    });
 
     tokio::select! {
         result = udp_task => {
@@ -71,6 +93,12 @@ async fn main() -> io::Result<()> {
                 Err(error) => Err(io::Error::other(format!("TCP task failed: {error}"))),
             }
         }
+        result = reload_task => {
+            match result {
+                Ok(()) => Err(io::Error::other("Reload task ended")),
+                Err(error) => Err(io::Error::other(format!("Reload task failed: {error}"))),
+            }
+        }
         _ = tokio::signal::ctrl_c() => {
             println!("Shutdown requested");
             Ok(())
@@ -78,11 +106,7 @@ async fn main() -> io::Result<()> {
     }
 }
 
-async fn run_udp_proxy(
-    blocklist: Arc<Blocklist>,
-    cloudflare_v4: Arc<NetworkList>,
-    cloudflare_v6: Arc<NetworkList>,
-) -> io::Result<()> {
+async fn run_udp_proxy(shared: SharedData) -> io::Result<()> {
     let listener = Arc::new(UdpSocket::bind(LISTEN_ADDR).await?);
     let mut buffer = vec![0_u8; MAX_UDP_PACKET_SIZE];
 
@@ -90,9 +114,10 @@ async fn run_udp_proxy(
         let (length, client_addr) = listener.recv_from(&mut buffer).await?;
         let request = buffer[..length].to_vec();
         let client_socket = Arc::clone(&listener);
-        let blocklist = Arc::clone(&blocklist);
-        let cloudflare_v4 = Arc::clone(&cloudflare_v4);
-        let cloudflare_v6 = Arc::clone(&cloudflare_v6);
+        let data = current_data(&shared);
+        let blocklist = Arc::clone(&data.blocklist);
+        let cloudflare_v4 = Arc::clone(&data.cloudflare_v4);
+        let cloudflare_v6 = Arc::clone(&data.cloudflare_v6);
 
         tokio::spawn(async move {
             if let Err(error) = forward_udp(
@@ -181,18 +206,15 @@ async fn forward_udp(
     Ok(())
 }
 
-async fn run_tcp_proxy(
-    blocklist: Arc<Blocklist>,
-    cloudflare_v4: Arc<NetworkList>,
-    cloudflare_v6: Arc<NetworkList>,
-) -> io::Result<()> {
+async fn run_tcp_proxy(shared: SharedData) -> io::Result<()> {
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
 
     loop {
         let (client, client_addr) = listener.accept().await?;
-        let blocklist = Arc::clone(&blocklist);
-        let cloudflare_v4 = Arc::clone(&cloudflare_v4);
-        let cloudflare_v6 = Arc::clone(&cloudflare_v6);
+        let data = current_data(&shared);
+        let blocklist = Arc::clone(&data.blocklist);
+        let cloudflare_v4 = Arc::clone(&data.cloudflare_v4);
+        let cloudflare_v6 = Arc::clone(&data.cloudflare_v6);
 
         tokio::spawn(async move {
             if let Err(error) = forward_tcp(

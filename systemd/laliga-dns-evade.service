@@ -9,6 +9,7 @@ Type=simple
 User=laliga-dns-evade
 Group=laliga-dns-evade
 ExecStart=/usr/local/bin/laliga-dns-evade
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
 

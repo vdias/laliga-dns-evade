@@ -13,10 +13,10 @@
 #   VDIAS
 #
 # Version:
-#   1.1.0
+#   1.2.0
 #
 # Date:
-#   2026-09-14
+#   2026-10-25
 #
 # Requirements:
 #   - bash
@@ -29,6 +29,7 @@
 #   - laliga-dns-evade.service
 #
 # Changelog:
+#   1.2.0 - Reload the service with SIGHUP instead of restarting it.
 #   1.1.0 - Remove AdGuard Home cache flush; cache is now provided by dnsproxy.
 #   1.0.0 - Initial production updater.
 #
@@ -328,11 +329,11 @@ main() {
         "${TEMP_DIR}/cloudflare-v6.txt" \
         "${CF_V6_FILE}"
 
-    log "Restarting ${SERVICE_NAME}"
+    log "Reloading ${SERVICE_NAME}"
 
-    if ! systemctl restart "${SERVICE_NAME}"; then
+    if ! systemctl reload "${SERVICE_NAME}"; then
         restore_backup
-        fail "Service restart failed; previous data restored"
+        fail "Service reload failed; previous data restored"
     fi
 
     if ! systemctl is-active --quiet "${SERVICE_NAME}"; then
