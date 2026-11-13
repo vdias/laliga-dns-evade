@@ -14,6 +14,7 @@ ExecStart=/usr/local/bin/dnsproxy \
     --cache \
     --cache-size=67108864 \
     --cache-optimistic \
+    --hosts-file-enabled=false \
     --upstream-mode=parallel \
     --upstream=h3://1.1.1.1/dns-query \
     --upstream=h3://1.0.0.1/dns-query \

@@ -4,6 +4,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-13
+
+### Fixed
+
+- `dnsproxy.service` passes `--hosts-file-enabled=false`. `dnsproxy` reads `/etc/hosts` by default since v0.73.0 and answered the FQDN of the host with its `/etc/hosts` address (`127.0.1.1`) to every client.
+
 ## [0.2.0] - 2026-10-25
 
 ### Changed
